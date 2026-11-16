@@ -4,7 +4,7 @@ Stateless website uptime checker with Telegram alerts. Built to run as a
 scheduled **Cron Job on Abasthan** (free tier), but works anywhere Node.js ≥ 18
 runs. Zero dependencies.
 
-Two run modes:
+Three run modes:
 
 - **`MODE=once`** (default) — check every URL in `TARGETS` once and exit, for
   cron / scheduled jobs. If any target is down (network error, timeout, or
@@ -12,6 +12,9 @@ Two run modes:
 - **`MODE=loop`** — stay running as a background worker: check, sleep
   `INTERVAL_MINUTES`, repeat. State is kept in memory, so alerts fire only on
   transitions — once when a target goes down, once when it recovers.
+- **`MODE=web`** — like loop, plus an HTTP server on `$PORT` (default 8080)
+  serving a live status page at `/` and a health check at `/healthz`. For
+  PaaS web services that require the app to bind `$PORT`.
 
 ## Environment variables
 
@@ -20,7 +23,8 @@ Two run modes:
 | `TARGETS`          | yes      | Comma-separated URLs, e.g. `https://a.com,https://b.com`       |
 | `TG_BOT_TOKEN`     | yes*     | Telegram bot token from @BotFather                             |
 | `TG_CHAT_ID`       | yes*     | Chat id that receives the alerts                               |
-| `MODE`             | no       | `once` (default) or `loop`                                     |
+| `MODE`             | no       | `once` (default), `loop` or `web`                              |
+| `PORT`             | no       | Web mode listen port (platform-injected; default `8080`)       |
 | `INTERVAL_MINUTES` | no       | Loop interval in minutes (default `30`)                        |
 | `TIMEOUT_MS`       | no       | Per-request timeout in ms (default `10000`)                    |
 
@@ -50,9 +54,13 @@ MODE=loop INTERVAL_MINUTES=30 TARGETS="https://example.com" \
 ## Deploy on Abasthan
 
 Abasthan's console (as of 2026-11) does not actually offer the advertised
-Cron Job type, so deploy as a **Background Worker**:
+Cron Job type, and creating a Background Worker currently fails with a
+platform-side error — so deploy as a **Web Service**:
 
-1. Create App → **Background Worker**, source: this (public) Git repository.
+1. Create App → **Web Service**, source: this (public) Git repository.
 2. Runtime Node.js, start command `node index.js`.
-3. Environment: `MODE=loop`, `INTERVAL_MINUTES=30`, plus `TARGETS`,
-   `TG_BOT_TOKEN`, `TG_CHAT_ID` from the table above.
+3. Environment: `MODE=web`, `INTERVAL_MINUTES=30`, plus `TARGETS`,
+   `TG_BOT_TOKEN`, `TG_CHAT_ID` from the table above. (`PORT` is injected by
+   the platform — do not set it.)
+4. The status page is then at the service's public URL; `/healthz` returns
+   `ok`.
