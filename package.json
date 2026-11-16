@@ -1,0 +1,1 @@
+{"description":"Stateless website uptime checker with Telegram alerts, built for Abasthan Cron Jobs","engines":{"node":">=18"},"name":"uptime-watch","private":true,"scripts":{"start":"node index.js"},"type":"module","version":"1.0.0"}
