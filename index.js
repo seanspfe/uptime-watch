@@ -1,18 +1,24 @@
-// uptime-watch: stateless website checker with Telegram alerts.
-// Built to run as a scheduled Cron Job on Abasthan's free tier.
-// No dependencies — Node.js >= 18 (uses built-in fetch).
+// uptime-watch: website checker with Telegram alerts. Zero dependencies,
+// Node.js >= 18 (built-in fetch). Two run modes:
+//
+//   MODE=once (default) — check all targets once and exit. For cron /
+//     scheduled jobs. Stateless: every failing run reports, and there is
+//     no "recovered" message (recovery detection needs stored state).
+//
+//   MODE=loop — stay running as a background worker: check, sleep
+//     INTERVAL_MINUTES, repeat. State is kept in memory, so alerts fire
+//     only on transitions: once when a target goes down, once when it
+//     recovers. A process restart forgets state (worst case: one repeat
+//     alert after a restart).
 //
 // Environment variables:
-//   TARGETS       comma-separated URLs to check, e.g. "https://a.com,https://b.com"
-//   TG_BOT_TOKEN  Telegram bot token (from @BotFather)
-//   TG_CHAT_ID    Telegram chat id to receive alerts
-//   TIMEOUT_MS    per-request timeout in ms (default 10000)
-//
-// Behaviour (stateless by design — nothing is stored between runs):
-//   - Every run checks all TARGETS once.
-//   - If any target is down, one Telegram message lists all failures.
-//   - A target that stays down is re-reported on every run; there is no
-//     "recovered" message, because recovery detection needs stored state.
+//   TARGETS           comma-separated URLs, e.g. "https://a.com,https://b.com"
+//   TG_BOT_TOKEN      Telegram bot token (from @BotFather)
+//   TG_CHAT_ID        Telegram chat id to receive alerts
+//   MODE              "once" (default) or "loop"
+//   INTERVAL_MINUTES  loop interval in minutes (default 30)
+//   INTERVAL_SECONDS  optional, overrides INTERVAL_MINUTES (mainly for tests)
+//   TIMEOUT_MS        per-request timeout in ms (default 10000)
 
 const targets = (process.env.TARGETS || '')
   .split(',')
@@ -21,6 +27,10 @@ const targets = (process.env.TARGETS || '')
 const token = process.env.TG_BOT_TOKEN || '';
 const chatId = process.env.TG_CHAT_ID || '';
 const timeoutMs = parseInt(process.env.TIMEOUT_MS || '10000', 10);
+const mode = (process.env.MODE || 'once').toLowerCase();
+const intervalMs =
+  (parseInt(process.env.INTERVAL_SECONDS || '', 10) ||
+    parseInt(process.env.INTERVAL_MINUTES || '30', 10) * 60) * 1000;
 
 async function check(url) {
   const started = Date.now();
@@ -71,27 +81,70 @@ async function sendTelegram(text) {
   }
 }
 
-async function main() {
-  if (targets.length === 0) {
-    console.log('[uptime-watch] TARGETS is empty — nothing to check. Set TARGETS and re-run.');
-    return;
-  }
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// One check cycle. `state` is null in once mode (report all failures), or a
+// Map<url, boolean> in loop mode (report only transitions).
+async function runCycle(state) {
   const results = await Promise.all(targets.map(check));
   for (const r of results) {
     console.log(
       `[uptime-watch] ${r.ok ? 'OK  ' : 'DOWN'} ${r.url} — ${r.detail} (${r.ms}ms)`
     );
   }
-  const down = results.filter((r) => !r.ok);
-  if (down.length > 0) {
-    const lines = down
+  const now = new Date().toISOString();
+  if (state === null) {
+    const down = results.filter((r) => !r.ok);
+    if (down.length > 0) {
+      const lines = down
+        .map((r) => `🔴 ${r.url}\n${r.detail} (${r.ms}ms)`)
+        .join('\n\n');
+      await sendTelegram(`⚠️ 网站巡检报警（${down.length} 个异常）\n\n${lines}\n\n时间：${now}`);
+    } else {
+      console.log(`[uptime-watch] All ${results.length} target(s) healthy.`);
+    }
+    return;
+  }
+  const newlyDown = [];
+  const recovered = [];
+  for (const r of results) {
+    const prev = state.get(r.url);
+    if (!r.ok && prev !== false) newlyDown.push(r);
+    if (r.ok && prev === false) recovered.push(r);
+    state.set(r.url, r.ok);
+  }
+  if (newlyDown.length > 0) {
+    const lines = newlyDown
       .map((r) => `🔴 ${r.url}\n${r.detail} (${r.ms}ms)`)
       .join('\n\n');
-    await sendTelegram(
-      `⚠️ 网站巡检报警（${down.length} 个异常）\n\n${lines}\n\n时间：${new Date().toISOString()}`
+    await sendTelegram(`⚠️ 网站巡检报警（${newlyDown.length} 个新异常）\n\n${lines}\n\n时间：${now}`);
+  }
+  if (recovered.length > 0) {
+    const lines = recovered.map((r) => `🟢 ${r.url}\n${r.detail} (${r.ms}ms)`).join('\n\n');
+    await sendTelegram(`✅ 网站已恢复（${recovered.length} 个）\n\n${lines}\n\n时间：${now}`);
+  }
+}
+
+async function main() {
+  if (targets.length === 0) {
+    console.log('[uptime-watch] TARGETS is empty — nothing to check. Set TARGETS and re-run.');
+    return;
+  }
+  if (mode === 'loop') {
+    console.log(
+      `[uptime-watch] Loop mode: ${targets.length} target(s), every ${Math.round(intervalMs / 1000)}s.`
     );
+    const state = new Map();
+    for (;;) {
+      try {
+        await runCycle(state);
+      } catch (e) {
+        console.error('[uptime-watch] Cycle error:', e);
+      }
+      await sleep(intervalMs);
+    }
   } else {
-    console.log(`[uptime-watch] All ${results.length} target(s) healthy.`);
+    await runCycle(null);
   }
 }
 
